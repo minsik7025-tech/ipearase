@@ -1,0 +1,10 @@
+{
+  "name": "eraser-classroom-hide-and-seek",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "npx serve .",
+    "test": "node scripts/verify-static-app.mjs",
+    "build": "node scripts/verify-static-app.mjs"
+  }
+}
