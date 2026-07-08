@@ -1828,8 +1828,9 @@ function updateRemotes(dt){
   });
 }
 
+const WHISTLE_AUDIBLE_RANGE=150;
 function playWhistleFromPosition(pos){
-  if(Audio2.muted||G.screen!=="GAME"||G.role!=="seeker"||G.phase!=="SEEK"||G.spectating)return;
+  if(Audio2.muted||G.screen!=="GAME"||G.phase!=="SEEK")return;
   Audio2.init();
   if(Audio2.ctx?.state==="suspended"){
     toast("🔊 화면을 한 번 클릭하면 휘파람 소리가 켜져요");
@@ -1837,12 +1838,12 @@ function playWhistleFromPosition(pos){
   }
   const dx=pos.x-G.pos.x,dz=pos.z-G.pos.z;
   const d=Math.hypot(dx,pos.y-G.pos.y,dz);
-  if(d>58)return;
+  if(d>WHISTLE_AUDIBLE_RANGE)return;
   const angleTo=Math.atan2(-dx,-dz);
   const rel=angleDelta(G.yaw,angleTo);
   const side=clamp(Math.sin(rel),-1,1);
-  const closeness=clamp(1-d/58,0,1);
-  const vol=0.035+Math.pow(closeness,1.3)*0.48;
+  const closeness=clamp(1-d/WHISTLE_AUDIBLE_RANGE,0,1);
+  const vol=0.06+Math.pow(closeness,1.3)*0.52;
   const pitch=0.9+closeness*0.24;
   Audio2.whistle(side,vol,pitch);
 }
@@ -3147,7 +3148,7 @@ const Net={
   sendPose(){ G.lastPosSent=""; },
   sendWhistle(){
     if(this.mode!=="online"||!this.db||!this.code||G.role!=="hider"||G.phase!=="SEEK"||G.found){
-      if(G.screen==="GAME")toast("휘파람은 술래가 찾는 중인 지우개만 불 수 있어요");
+      if(G.screen==="GAME")toast("휘파람은 찾기 시간의 지우개만 불 수 있어요");
       return false;
     }
     const now=this.now();
@@ -3160,7 +3161,7 @@ const Net={
     const ref=this.fb.push(this.fb.ref(this.db,`rooms/${this.code}/whistles`));
     this.fb.set(ref,{uid:this.uid,x:+p.x.toFixed(2),y:+p.y.toFixed(2),z:+p.z.toFixed(2),t:now,spectating:!!G.spectating}).catch(()=>{});
     Audio2.whistle(0,0.09,1.05);
-    toast(G.spectating?"휘익! 숨은 자리에서 휘파람을 보냈어요":"휘익! 술래에게 위치 힌트를 보냈어요");
+    toast(G.spectating?"휘익! 숨은 자리에서 휘파람을 보냈어요":"휘익! 모두에게 위치 힌트를 보냈어요");
     return true;
   },
   uploadTex(force=false){
