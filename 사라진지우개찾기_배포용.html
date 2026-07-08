@@ -1829,6 +1829,11 @@ function updateRemotes(dt){
 
 function playWhistleFromPosition(pos){
   if(Audio2.muted||G.screen!=="GAME"||G.role!=="seeker"||G.phase!=="SEEK"||G.spectating)return;
+  Audio2.init();
+  if(Audio2.ctx?.state==="suspended"){
+    toast("🔊 화면을 한 번 클릭하면 휘파람 소리가 켜져요");
+    return;
+  }
   const dx=pos.x-G.pos.x,dz=pos.z-G.pos.z;
   const d=Math.hypot(dx,pos.y-G.pos.y,dz);
   if(d>58)return;
@@ -2330,7 +2335,7 @@ function flySampleRing(cx,cy,col){
 
 /* ================= 색칠 모드 ================= */
 let mirrorAngle=0,mirrorPitch=0.28;
-let mirrorLast=null;
+let mirrorLast=null,mirrorStart=null,mirrorPointerId=null;
 function setMirror(on){
   if(on&&!(G.role==="hider"&&(G.lobbyPractice||G.phase==="PAINT"||G.phase==="SEEK")&&!G.found))return;
   if(on&&G.spectating)toggleSpectatorMode(false);
@@ -2341,7 +2346,7 @@ function setMirror(on){
     mirrorPitch=clamp(0.28+G.pitch*0.22,-0.18,1.12);
     mirrorLast=null;
     document.exitPointerLock&&document.exitPointerLock();
-    $("mirrorHint").textContent=IS_TOUCH?"색칠 모드: 보이는 부위만 손가락으로 칠하기":"색칠 모드: 클릭·드래그로 칠하기 · 스포이트로 교실 색 가져오기 · E 완료";
+    $("mirrorHint").textContent=IS_TOUCH?"색칠 모드: 탭하면 칠하기 · 드래그하면 캐릭터 돌리기":"색칠 모드: 클릭하면 칠하기 · 드래그하면 캐릭터 돌리기 · 스포이트 · E 완료";
     $("mirrorHint").classList.remove("hidden");
     $("deskHint").classList.add("hidden");
     if(IS_TOUCH){$("btnMirrorDone").classList.remove("hidden");$("joyBase").style.display="none";}
@@ -2596,6 +2601,7 @@ addEventListener("keydown",e=>{
   keys[e.code]=true;keys[key]=true;
   if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code))e.preventDefault();
   if(G.screen!=="GAME")return;
+  Audio2.resume();
   if(e.code==="KeyE")setMirror(!G.mirror);
   if(e.code==="Space"&&!e.repeat){
     if(G.spectating)G.flyUp=true;
@@ -2660,12 +2666,9 @@ renderer.domElement.addEventListener("mousedown",e=>{
   }
   if(G.mirror){
     if(e.button===2){trySample(e.clientX,e.clientY);return;}
-    if(tryPaintAt(e.clientX,e.clientY)){
-      mirrorDrag="paint";
-    }else{
-      mirrorDrag="orbit";
-      mirrorLast=[e.clientX,e.clientY];
-    }
+    mirrorDrag="pending";
+    mirrorStart=[e.clientX,e.clientY];
+    mirrorLast=[e.clientX,e.clientY];
     return;
   }
   if(e.button===2||e.altKey){ if(G.role==="hider"&&(G.phase==="PAINT"||G.phase==="SEEK"))trySample(e.clientX,e.clientY); return; }
@@ -2681,17 +2684,20 @@ renderer.domElement.addEventListener("mousedown",e=>{
 });
 addEventListener("mousemove",e=>{
   if(!G.mirror)return;
-  if(mirrorDrag==="paint"){
-    // 색칠 중 포인터가 지우개 밖으로 나가도 카메라 회전으로 전환하지 않습니다.
-    tryPaintAt(e.clientX,e.clientY);
-  }else if(mirrorDrag==="orbit"&&mirrorLast){
+  if(mirrorDrag==="pending"&&mirrorStart&&Math.hypot(e.clientX-mirrorStart[0],e.clientY-mirrorStart[1])>6){
+    mirrorDrag="orbit";
+  }
+  if(mirrorDrag==="orbit"&&mirrorLast){
     mirrorAngle-=(e.clientX-mirrorLast[0])*0.007;
     mirrorPitch=clamp(mirrorPitch+(e.clientY-mirrorLast[1])*0.0055,-0.18,1.12);
     mirrorLast=[e.clientX,e.clientY];
   }
 });
-addEventListener("mouseup",()=>{
-  mirrorDrag=null;mirrorLast=null;lastPaintPx=null;
+addEventListener("mouseup",e=>{
+  if(G.mirror&&mirrorDrag==="pending"&&mirrorStart){
+    tryPaintAt(mirrorStart[0],mirrorStart[1]);
+  }
+  mirrorDrag=null;mirrorLast=null;mirrorStart=null;mirrorPointerId=null;lastPaintPx=null;
   if(seekerLookDrag){
     if(G.role==="seeker"&&G.phase==="SEEK"&&!seekerDragMoved)tryJudge(mouseX,mouseY);
     seekerLookDrag=null;
@@ -2730,12 +2736,11 @@ renderer.domElement.addEventListener("pointerdown",e=>{
   }
   renderer.domElement.setPointerCapture?.(e.pointerId);
   if(G.mirror){
-    if(tryPaintAt(e.clientX,e.clientY)){
-      paintTouch=e.pointerId;
-    }else{
-      lookId=e.pointerId;
-      lastLook=[e.clientX,e.clientY];
-    }
+    lookId=e.pointerId;
+    mirrorPointerId=e.pointerId;
+    mirrorDrag="pending";
+    mirrorStart=[e.clientX,e.clientY];
+    lastLook=[e.clientX,e.clientY];
     return;
   }
   if(e.clientX<innerWidth*0.45&&joyId===null){
@@ -2747,11 +2752,11 @@ renderer.domElement.addEventListener("pointerdown",e=>{
 addEventListener("pointermove",e=>{
   if(!IS_TOUCH)return;
   if(G.mirror){
-    if(e.pointerId===paintTouch){
-      // 색칠을 시작한 손가락은 지우개 밖으로 나가도 끝까지 색칠 입력으로 유지합니다.
-      tryPaintAt(e.clientX,e.clientY);
-    }else if(e.pointerId===lookId&&lastLook){
-      // 지우개가 아니라 카메라가 지우개 주위를 돕니다.
+    if(e.pointerId===lookId&&lastLook){
+      if(mirrorDrag==="pending"&&mirrorStart&&Math.hypot(e.clientX-mirrorStart[0],e.clientY-mirrorStart[1])>7){
+        mirrorDrag="orbit";
+      }
+      if(mirrorDrag!=="orbit")return;
       mirrorAngle-=(e.clientX-lastLook[0])*0.008;
       mirrorPitch=clamp(mirrorPitch+(e.clientY-lastLook[1])*0.006,-0.18,1.12);
       lastLook=[e.clientX,e.clientY];
@@ -2771,10 +2776,14 @@ addEventListener("pointermove",e=>{
   }
 });
 function releasePointerInput(e){
+  if(G.mirror&&e.pointerId===mirrorPointerId&&mirrorDrag==="pending"&&mirrorStart){
+    tryPaintAt(mirrorStart[0],mirrorStart[1]);
+  }
   if(e.pointerId===joyId){joyId=null;G.moveIn.x=0;G.moveIn.z=0;$("joyBase").style.display="none";
     $("joyKnob").style.left="34px";$("joyKnob").style.top="34px";}
   if(e.pointerId===lookId){lookId=null;lastLook=null;}
   if(e.pointerId===paintTouch){paintTouch=null;lastPaintPx=null;}
+  if(e.pointerId===mirrorPointerId){mirrorPointerId=null;mirrorDrag=null;mirrorStart=null;lastPaintPx=null;}
   if(e.pointerId===flightUpId){flightUpId=null;G.flyUp=false;}
   if(e.pointerId===flightDownId){flightDownId=null;G.flyDown=false;}
   try{renderer.domElement.releasePointerCapture?.(e.pointerId);}catch(_e){}
@@ -2839,7 +2848,7 @@ function setPose(p){
 const Net={
   mode:"none", fb:null, db:null, uid:null, code:"", nick:"",
   players:{}, presence:{}, positions:{}, meta:{}, offset:0, posTimer:null, heartbeatTimer:null, texTimer:null, hostTimer:null,
-  phaseAdvanceLock:false, openRooms:[], roomWatchStarted:false, leaving:false, aiMemory:{}, learningSavedRound:null, aiHidePlans:{}, lastWhistleAt:0,
+  phaseAdvanceLock:false, openRooms:[], roomWatchStarted:false, leaving:false, aiMemory:{}, learningSavedRound:null, aiHidePlans:{}, lastWhistleAt:0, aiWhistleNext:{},
   async initFirebase(){
     if(this.db)return true;
     if(!FIREBASE_CONFIG||!FIREBASE_CONFIG.databaseURL){
@@ -3387,6 +3396,29 @@ const Net={
     if(m.horizontal>maxHorizontal||m.dist3>AI_TAG_3D_RANGE)return false;
     return this.aiCanSpotTarget(aiPos,targetPos,aiRy);
   },
+  nearestSeekerDistanceFrom(pos){
+    let best=Infinity;
+    Object.entries(this.players).forEach(([uid,p])=>{
+      if(p.role!=="seeker")return;
+      const parsed=parsePositionString(this.positions[uid]);
+      const s=parsed||seekerSpawn;
+      best=Math.min(best,Math.hypot((s.x||0)-pos.x,(s.y||0)-pos.y,(s.z||0)-pos.z));
+    });
+    return best;
+  },
+  maybeAIWhistle(uid,pos,now,patch){
+    if(this.meta.phase!=="SEEK")return;
+    if(now<(this.aiWhistleNext[uid]||0))return;
+    const d=this.nearestSeekerDistanceFrom(pos);
+    const roundAge=now-(this.meta.phaseStartedAt||now);
+    const seed=mulberry32(Math.abs(hashUid(`${uid}:${Math.floor(now/7000)}:whistle`)))();
+    const goodDistance=d>=11&&d<=48;
+    const brave=roundAge>15000&&seed>(d<18?0.78:0.58);
+    this.aiWhistleNext[uid]=now+rand(12000,26000);
+    if(!goodDistance||!brave)return;
+    const key=`${uid}_${now}_${Math.floor(seed*1000)}`;
+    patch[`rooms/${this.code}/whistles/${key}`]={uid,x:+pos.x.toFixed(2),y:+pos.y.toFixed(2),z:+pos.z.toFixed(2),t:now,ai:true};
+  },
   async syncAIBotsForLobby(){
     if(!G.isHost||this.mode!=="online"||!this.db||!this.code)return;
     const aiCount=this.desiredAICount();
@@ -3487,6 +3519,7 @@ const Net={
         }else{
           next.copy(hide.pos);
           pose=hide.pose;
+          this.maybeAIWhistle(uid,next,now,patch);
         }
       }else if(p.role==="seeker"&&this.meta.phase==="SEEK"){
         const target=this.findAISeekTarget(cur,ry);
