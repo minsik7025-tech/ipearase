@@ -824,6 +824,11 @@ const AI_PATROL_POINTS={
   gym:[{x:0,z:-34},{x:-38,z:-24},{x:46,z:-24},{x:-12,z:34},{x:33,z:24},{x:0,z:28},{x:50,z:10}],
   music:[{x:0,z:-34},{x:-38,z:-17},{x:36,z:-10},{x:42,z:37},{x:-52,z:26},{x:12,z:2},{x:30,z:20}]
 };
+const AI_SIGHT_RANGE=30;
+const AI_HIGH_SIGHT_VERTICAL=24;
+const AI_TAG_HORIZONTAL=4.8;
+const AI_HIGH_TAG_HORIZONTAL=10;
+const AI_TAG_3D_RANGE=25;
 let currentMapKind="classroom", mapObjects=[];
 function rebuildMap(kind="classroom"){
   const next=MAPS[kind]?kind:"classroom";
@@ -3203,9 +3208,23 @@ const Net={
     const p=points[(step+Math.abs(hashUid(uid))%points.length)%points.length];
     return new THREE.Vector3(p.x,0,p.z);
   },
+  aiEyePoint(pos){
+    return new THREE.Vector3(pos.x,(pos.y||0)+1.7,pos.z);
+  },
+  aiTargetPoint(pos){
+    const pose=pos.pose||"stand";
+    const offset=pose==="lie"?0.35:(pose==="lean"?0.85:1.1);
+    return new THREE.Vector3(pos.x,(pos.y||0)+offset,pos.z);
+  },
+  aiTargetMetrics(aiPos,targetPos){
+    const dx=targetPos.x-aiPos.x,dz=targetPos.z-aiPos.z;
+    const horizontal=Math.hypot(dx,dz);
+    const vertical=Math.abs((targetPos.y||0)-(aiPos.y||0));
+    return {dx,dz,horizontal,vertical,dist3:Math.hypot(horizontal,vertical)};
+  },
   aiLineBlocked(from,to){
-    const a=new THREE.Vector3(from.x,Math.max(1.2,from.y||0)+0.8,from.z);
-    const b=new THREE.Vector3(to.x,Math.max(1.2,to.y||0)+0.8,to.z);
+    const a=this.aiEyePoint(from);
+    const b=this.aiTargetPoint(to);
     const dir=b.clone().sub(a);
     const dist=dir.length();
     if(dist<0.01)return false;
@@ -3216,14 +3235,23 @@ const Net={
     return occlusionRay.intersectObjects(samplables,false).length>0;
   },
   aiCanSpotTarget(aiPos,targetPos,aiRy){
-    const dx=targetPos.x-aiPos.x,dz=targetPos.z-aiPos.z;
-    const dist=Math.hypot(dx,dz);
-    if(dist>26)return false;
+    const m=this.aiTargetMetrics(aiPos,targetPos);
+    if(m.dist3>AI_SIGHT_RANGE||m.vertical>AI_HIGH_SIGHT_VERTICAL||m.horizontal>AI_SIGHT_RANGE)return false;
     const facing=new THREE.Vector3(-Math.sin(aiRy||0),0,-Math.cos(aiRy||0));
-    const toTarget=new THREE.Vector3(dx,0,dz).normalize();
-    const cone=dist<8?0.08:0.34;
-    if(facing.dot(toTarget)<cone)return false;
+    if(m.horizontal>0.08){
+      const toTarget=new THREE.Vector3(m.dx,0,m.dz).normalize();
+      const highTarget=m.vertical>3.5;
+      const cone=m.horizontal<8?(highTarget?-0.08:0.08):(highTarget?0.14:0.34);
+      if(facing.dot(toTarget)<cone)return false;
+    }
     return !this.aiLineBlocked(aiPos,targetPos);
+  },
+  aiCanTagTarget(aiPos,targetPos,aiRy){
+    const m=this.aiTargetMetrics(aiPos,targetPos);
+    const highTarget=m.vertical>3.5;
+    const maxHorizontal=highTarget?AI_HIGH_TAG_HORIZONTAL:AI_TAG_HORIZONTAL;
+    if(m.horizontal>maxHorizontal||m.dist3>AI_TAG_3D_RANGE)return false;
+    return this.aiCanSpotTarget(aiPos,targetPos,aiRy);
   },
   async syncAIBotsForLobby(){
     if(!G.isHost||this.mode!=="online"||!this.db||!this.code)return;
@@ -3247,14 +3275,15 @@ const Net={
     return this.aiHideTarget(uid,index);
   },
   findAISeekTarget(aiPos,aiRy){
-    let best=null,bestD=Infinity;
+    let best=null,bestScore=Infinity;
     Object.entries(this.players).forEach(([uid,p])=>{
       if(p.role!=="hider"||p.found)return;
       const parsed=parsePositionString(this.positions[uid]);
       if(!parsed)return;
       if(!this.aiCanSpotTarget(aiPos,parsed,aiRy))return;
-      const d=Math.hypot(parsed.x-aiPos.x,parsed.z-aiPos.z);
-      if(d<bestD){bestD=d;best={uid,pos:parsed,d};}
+      const m=this.aiTargetMetrics(aiPos,parsed);
+      const score=m.horizontal+m.vertical*0.35+(isAIUid(uid)?1.5:0);
+      if(score<bestScore){bestScore=score;best={uid,pos:parsed,d:m.horizontal,vertical:m.vertical,score};}
     });
     return best;
   },
@@ -3329,13 +3358,17 @@ const Net={
         const target=this.findAISeekTarget(cur,ry);
         if(target){
           const dx=target.pos.x-cur.x,dz=target.pos.z-cur.z,dist=Math.hypot(dx,dz);
-          ry=Math.atan2(-dx,-dz);
-          if(dist>2.7){
-            next.x+=dx/dist*2.4;
-            next.z+=dz/dist*2.4;
-          }else if(this.aiCanSpotTarget(cur,target.pos,ry)){
+          if(dist>0.08)ry=Math.atan2(-dx,-dz);
+          const highTarget=Math.abs((target.pos.y||0)-(cur.y||0))>3.5;
+          const stopDistance=highTarget?7.2:2.7;
+          if(this.aiCanTagTarget(cur,target.pos,ry)){
             patch[`rooms/${this.code}/players/${target.uid}/found`]=true;
             patch[`rooms/${this.code}/players/${target.uid}/foundAt`]=now;
+          }else if(dist>stopDistance){
+            next.x+=dx/dist*Math.min(2.4,dist-stopDistance);
+            next.z+=dz/dist*Math.min(2.4,dist-stopDistance);
+          }else if(highTarget){
+            ry+=0.18;
           }
         }else{
           const patrol=this.aiPatrolPoint(uid,idx,now);
