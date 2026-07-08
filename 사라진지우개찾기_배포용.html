@@ -622,9 +622,9 @@ const Audio2={
     g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(0.001,t+dur);
     o.connect(g);g.connect(this.master);o.start(t);o.stop(t+dur+0.02);
   },
-  whistle(pan=0,vol=0.22,pitch=1){
+  whistle(pan=0,vol=0.22,pitch=1,when=0){
     if(!this.ctx||this.muted)return;
-    const t=this.ctx.currentTime;
+    const t=this.ctx.currentTime+when;
     const out=this.ctx.createGain();
     out.gain.setValueAtTime(Math.max(0.01,vol),t);
     out.gain.exponentialRampToValueAtTime(0.001,t+0.72);
@@ -1851,7 +1851,7 @@ function playWhistleFromPosition(pos){
   const closeness=clamp(1-d/WHISTLE_AUDIBLE_RANGE,0,1);
   const vol=0.06+Math.pow(closeness,1.3)*0.52;
   const pitch=0.9+closeness*0.24;
-  Audio2.whistle(side,vol,pitch);
+  [0,0.58,1.12].forEach((delay,i)=>Audio2.whistle(side,vol*(i===2?0.82:1),pitch+(i===1?0.045:0),delay));
 }
 
 
@@ -2866,7 +2866,7 @@ function setPose(p){
 const Net={
   mode:"none", fb:null, appM:null, db:null, uid:null, code:"", nick:"",
   players:{}, presence:{}, positions:{}, meta:{}, offset:0, posTimer:null, heartbeatTimer:null, texTimer:null, hostTimer:null,
-  phaseAdvanceLock:false, openRooms:[], roomWatchStarted:false, leaving:false, aiMemory:{}, sharedMemoryDbs:null, learningSavedRound:null, aiHidePlans:{}, lastWhistleAt:0, aiWhistleNext:{},
+  phaseAdvanceLock:false, openRooms:[], roomWatchStarted:false, leaving:false, aiMemory:{}, sharedMemoryDbs:null, learningSavedRound:null, aiHidePlans:{}, lastWhistleAt:0, aiWhistleNext:{}, aiHeardWhistles:{},
   async initFirebase(){
     if(this.db)return true;
     if(!FIREBASE_CONFIG||!FIREBASE_CONFIG.databaseURL){
@@ -3118,6 +3118,9 @@ const Net={
     if(this.now()-(w.t||0)>10000)return;
     const sender=this.players[w.uid];
     if(sender&&sender.role&&sender.role!=="hider")return;
+    if(G.isHost){
+      this.aiHeardWhistles[key]={x:+w.x||0,y:+w.y||0,z:+w.z||0,t:+w.t||this.now(),uid:w.uid};
+    }
     playWhistleFromPosition({x:+w.x||0,y:+w.y||0,z:+w.z||0});
     if(G.isHost&&this.db){
       setTimeout(()=>this.fb.set(this.fb.ref(this.db,`rooms/${this.code}/whistles/${key}`),null).catch(()=>{}),2500);
@@ -3482,12 +3485,22 @@ const Net={
     const d=this.nearestSeekerDistanceFrom(pos);
     const roundAge=now-(this.meta.phaseStartedAt||now);
     const seed=mulberry32(Math.abs(hashUid(`${uid}:${Math.floor(now/7000)}:whistle`)))();
-    const goodDistance=d>=11&&d<=48;
-    const brave=roundAge>15000&&seed>(d<18?0.78:0.58);
-    this.aiWhistleNext[uid]=now+rand(12000,26000);
+    const goodDistance=d>=8&&d<=110;
+    const brave=roundAge>8000&&seed>(d<18?0.7:0.42);
+    this.aiWhistleNext[uid]=now+rand(9000,18000);
     if(!goodDistance||!brave)return;
     const key=`${uid}_${now}_${Math.floor(seed*1000)}`;
     patch[`rooms/${this.code}/whistles/${key}`]={uid,x:+pos.x.toFixed(2),y:+pos.y.toFixed(2),z:+pos.z.toFixed(2),t:now,ai:true};
+  },
+  recentWhistleInvestigation(now){
+    let best=null;
+    Object.entries(this.aiHeardWhistles||{}).forEach(([key,w])=>{
+      if(!w||now-(w.t||0)>14000){delete this.aiHeardWhistles[key];return;}
+      const sender=this.players[w.uid];
+      if(sender&&sender.found){delete this.aiHeardWhistles[key];return;}
+      if(!best||w.t>best.t)best=w;
+    });
+    return best?new THREE.Vector3(best.x||0,best.y||0,best.z||0):null;
   },
   async syncAIBotsForLobby(){
     if(!G.isHost||this.mode!=="online"||!this.db||!this.code)return;
@@ -3606,12 +3619,15 @@ const Net={
             ry+=0.18;
           }
         }else{
-          const patrol=this.aiPatrolPoint(uid,idx,now);
+          const heard=this.recentWhistleInvestigation(now);
+          const patrol=heard||this.aiPatrolPoint(uid,idx,now);
           const dx=patrol.x-cur.x,dz=patrol.z-cur.z,dist=Math.hypot(dx,dz);
           if(dist>0.4){
             ry=Math.atan2(-dx,-dz);
-            next.x+=dx/dist*Math.min(2.0,dist);
-            next.z+=dz/dist*Math.min(2.0,dist);
+            const speed=heard?2.7:2.0;
+            next.x+=dx/dist*Math.min(speed,dist);
+            next.z+=dz/dist*Math.min(speed,dist);
+            if(heard)next.y+=(patrol.y-cur.y)*0.2;
           }else{
             ry+=0.35;
           }
