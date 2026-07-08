@@ -16,9 +16,13 @@ const requiredSnippets = [
   "showFullServerNotice",
   "기다리거나",
   "The_Chameleon_Strategy.mp3",
-  "Audio2.whistle(side,vol,pitch)",
-  "nearestWhistleTarget",
-  "updateWhistleCue",
+  "playWhistleFromPosition",
+  "sendWhistle",
+  "rooms/${this.code}/whistles",
+  "KeyH",
+  "H 휘파람",
+  "20dvh",
+  "env(safe-area-inset-bottom)",
   "aiCountSelect",
   "syncAIBotsForLobby",
   "runAIHostTick",
@@ -109,6 +113,8 @@ const removedSnippets = [
   "코드로 입장"
   ,"hostSeekerChk"
   ,"hostSeekerWrap"
+  ,"nearestWhistleTarget"
+  ,"updateWhistleCue"
 ];
 for (const snippet of removedSnippets) {
   if (game.includes(snippet)) {
