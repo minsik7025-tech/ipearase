@@ -2726,7 +2726,7 @@ function setPose(p){
 const Net={
   mode:"none", fb:null, db:null, uid:null, code:"", nick:"",
   players:{}, presence:{}, positions:{}, meta:{}, offset:0, posTimer:null, heartbeatTimer:null, texTimer:null, hostTimer:null,
-  phaseAdvanceLock:false, openRooms:[], roomWatchStarted:false, leaving:false, aiMemory:{}, learningSavedRound:null,
+  phaseAdvanceLock:false, openRooms:[], roomWatchStarted:false, leaving:false, aiMemory:{}, learningSavedRound:null, aiHidePlans:{},
   async initFirebase(){
     if(this.db)return true;
     if(!FIREBASE_CONFIG||!FIREBASE_CONFIG.databaseURL){
@@ -3154,16 +3154,28 @@ const Net={
     const seed=mulberry32(Math.abs(hashUid(`${uid}:${currentMapKind}:${spotIndex}`)))();
     return (spot.q||0)+distFromSeeker*0.55+(blocked?34:-24)+edge*14+poseBonus+heightBonus+learned+seed*5-index*0.45;
   },
-  aiChooseHideSpot(uid,index){
+  aiRankHideSpots(uid,index,assigned=[]){
     const spots=AI_HIDE_SPOTS[currentMapKind]||AI_HIDE_SPOTS.classroom;
-    const ranked=spots.map((spot,i)=>({spot,i,score:this.aiHideSpotScore(uid,index,spot,i)}))
+    return spots.map((spot,i)=>{
+      const pos=this.aiSpotPosition(spot);
+      const nearest=assigned.reduce((best,a)=>Math.min(best,pos.distanceTo(a.pos)),Infinity);
+      const separationPenalty=Number.isFinite(nearest)&&nearest<13?(13-nearest)*4.8:0;
+      return {spot,i,pos,score:this.aiHideSpotScore(uid,index,spot,i)-separationPenalty};
+    })
       .sort((a,b)=>b.score-a.score);
-    // 항상 1등만 고르면 AI가 한쪽에 몰리므로 상위권 안에서 uid/index로 분산합니다.
-    const pool=ranked.slice(0,Math.min(5,ranked.length));
-    return pool[(Math.abs(hashUid(uid))+index)%pool.length]?.spot||ranked[0]?.spot||spots[0];
   },
-  aiHideTarget(uid,index){
-    const spot=this.aiChooseHideSpot(uid,index);
+  aiChooseHideSpot(uid,index,assigned=[]){
+    const ranked=this.aiRankHideSpots(uid,index,assigned);
+    // 항상 1등만 고르면 AI가 한쪽에 몰리므로 상위권 안에서 uid/index로 분산합니다.
+    const pool=ranked
+      .filter(r=>!assigned.some(a=>r.pos.distanceTo(a.pos)<9))
+      .slice(0,Math.min(5,ranked.length));
+    if(pool.length)return pool[(Math.abs(hashUid(uid))+index)%pool.length].spot;
+    return ranked[0]?.spot||AI_HIDE_SPOTS.classroom[0];
+  },
+  aiHideTarget(uid,index,assigned=[]){
+    const planned=this.aiHidePlans?.[uid];
+    const spot=planned||this.aiChooseHideSpot(uid,index,assigned);
     const rng=mulberry32(Math.abs(hashUid(`${uid}:${currentMapKind}:hide`)));
     return {
       pos:new THREE.Vector3(
@@ -3174,6 +3186,16 @@ const Net={
       ry:Math.atan2(spot.x-seekerSpawn.x,spot.z-seekerSpawn.z)+Math.PI+(rng()-0.5)*0.55,
       pose:spot.pose||this.aiPoseFor(uid)
     };
+  },
+  planAIHideTargets(aiHiderIds){
+    const assigned=[];
+    this.aiHidePlans={};
+    aiHiderIds.forEach((uid,index)=>{
+      const spot=this.aiChooseHideSpot(uid,index,assigned);
+      const pos=this.aiSpotPosition(spot);
+      assigned.push({uid,spot,pos});
+      this.aiHidePlans[uid]=spot;
+    });
   },
   aiPatrolPoint(uid,index,now){
     const points=AI_PATROL_POINTS[currentMapKind]||AI_PATROL_POINTS.classroom;
@@ -3405,10 +3427,16 @@ const Net={
         const replacement=shuffled.find(id=>id!==this.uid&&!seekers.has(id));
         if(replacement)seekers.add(replacement);
       }
+      const rolesById=Object.fromEntries(Object.keys(latestPlayers).map(u=>[
+        u,
+        (u===this.uid&&hostRole==="ghost")?"ghost":(seekers.has(u)?"seeker":"hider")
+      ]));
+      this.planAIHideTargets(Object.keys(rolesById).filter(u=>isAIUid(u)&&rolesById[u]==="hider"));
+      this.learningSavedRound=null;
       // 1단계: 역할을 먼저 확정합니다. 술래가 지우개로 잠깐 스폰되는 경쟁 상태를 막습니다.
       const roleUpd={};
       Object.keys(latestPlayers).forEach(u=>{
-        const role=(u===this.uid&&hostRole==="ghost")?"ghost":(seekers.has(u)?"seeker":"hider");
+        const role=rolesById[u];
         roleUpd[`rooms/${this.code}/players/${u}/role`]=role;
         roleUpd[`rooms/${this.code}/players/${u}/found`]=false;
         roleUpd[`rooms/${this.code}/players/${u}/tex`]=isAIUid(u)&&role==="hider"?makeAICamoDataUrl(currentMapKind,u):null;
@@ -3447,6 +3475,17 @@ const Net={
 };
 
 /* ================= 페이즈 처리 ================= */
+function effectiveOwnPlayer(){
+  const me=Net.mode==="online"?Net.players[Net.uid]:null;
+  if(Net.mode==="online"&&G.isHost&&["seeker","hider"].includes(Net.meta.hostRole)){
+    return Object.assign({},me||{},{
+      nick:(me&&me.nick)||Net.nick||G.nick||"방장",
+      role:Net.meta.hostRole,
+      found:false
+    });
+  }
+  return me;
+}
 async function onPhaseChange(phase,prev){
   if(G.lobbyPractice){
     G.lobbyPractice=false;
@@ -3464,8 +3503,11 @@ async function onPhaseChange(phase,prev){
       if(meSnap.exists())Net.players[Net.uid]=meSnap.val();
     }catch(err){console.warn("내 역할 확인 실패, 로컬 값 사용",err);}
   }
-  const me=Net.mode==="online"?Net.players[Net.uid]:null;
-  if(me){G.role=me.role;G.found=!!me.found;}
+  const me=effectiveOwnPlayer();
+  if(me){
+    Net.players[Net.uid]=Object.assign({},Net.players[Net.uid]||{},me);
+    G.role=me.role;G.found=!!me.found;
+  }
   if(G.phase!==phase)return;
   if(Net.mode==="online")ensureRoomMap(Net.meta.mapKind||"classroom");
   if(phase==="PAINT")enterPaint();
@@ -3516,7 +3558,7 @@ function enterPaint(){
   [...remotes.keys()].forEach(removeRemote); // 라운드 리셋
   Net.reapplyRemotePositions?.();
   setTimeout(()=>Net.reapplyRemotePositions?.(),120);
-  const me=Net.mode==="online"?Net.players[Net.uid]:{role:G.role};
+  const me=Net.mode==="online"?effectiveOwnPlayer():{role:G.role};
   G.role=me.role||"hider";
   if(G.role==="hider"){
     const idx=Math.abs(hashUid(Net.uid||"p"))%hiderSpawns.length;
