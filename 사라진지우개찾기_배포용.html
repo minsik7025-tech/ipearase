@@ -2346,7 +2346,7 @@ function setMirror(on){
     mirrorPitch=clamp(0.28+G.pitch*0.22,-0.18,1.12);
     mirrorLast=null;
     document.exitPointerLock&&document.exitPointerLock();
-    $("mirrorHint").textContent=IS_TOUCH?"색칠 모드: 탭하면 칠하기 · 드래그하면 캐릭터 돌리기":"색칠 모드: 클릭하면 칠하기 · 드래그하면 캐릭터 돌리기 · 스포이트 · E 완료";
+    $("mirrorHint").textContent=IS_TOUCH?"색칠 모드: 캐릭터 위는 칠하기 · 배경은 돌리기":"색칠 모드: 캐릭터 위는 칠하기 · 배경은 돌리기 · 스포이트 · E 완료";
     $("mirrorHint").classList.remove("hidden");
     $("deskHint").classList.add("hidden");
     if(IS_TOUCH){$("btnMirrorDone").classList.remove("hidden");$("joyBase").style.display="none";}
@@ -2595,6 +2595,7 @@ let flightUpId=null,flightDownId=null;
 let pointerLocked=false;
 // PC 술래 전용: 마우스 커서가 곧 조준점. 클릭 후 드래그하면 시점 회전, 그대로 떼면 그 위치로 콕 찍기.
 let seekerLookDrag=null, seekerDragMoved=false;
+let pcLookDrag=null;
 let mouseX=innerWidth/2, mouseY=innerHeight/2;
 addEventListener("keydown",e=>{
   const key=String(e.key||"").toLowerCase();
@@ -2650,6 +2651,13 @@ renderer.domElement.addEventListener("mousemove",e=>{
     seekerLookDrag={x:e.clientX,y:e.clientY};
     return;
   }
+  if(pcLookDrag&&!IS_TOUCH&&!G.mirror){
+    const dx=e.clientX-pcLookDrag.x,dy=e.clientY-pcLookDrag.y;
+    G.yaw-=dx*0.0042;
+    G.pitch=clamp(G.pitch-dy*0.0042,-1.4,1.4);
+    pcLookDrag={x:e.clientX,y:e.clientY};
+    return;
+  }
   if(pointerLocked&&!G.mirror){
     G.yaw-=e.movementX*0.0024; G.pitch=clamp(G.pitch-e.movementY*0.0024,-1.4,1.4);
   }
@@ -2666,9 +2674,12 @@ renderer.domElement.addEventListener("mousedown",e=>{
   }
   if(G.mirror){
     if(e.button===2){trySample(e.clientX,e.clientY);return;}
-    mirrorDrag="pending";
-    mirrorStart=[e.clientX,e.clientY];
-    mirrorLast=[e.clientX,e.clientY];
+    if(tryPaintAt(e.clientX,e.clientY)){
+      mirrorDrag="paint";
+    }else{
+      mirrorDrag="orbit";
+      mirrorLast=[e.clientX,e.clientY];
+    }
     return;
   }
   if(e.button===2||e.altKey){ if(G.role==="hider"&&(G.phase==="PAINT"||G.phase==="SEEK"))trySample(e.clientX,e.clientY); return; }
@@ -2679,24 +2690,24 @@ renderer.domElement.addEventListener("mousedown",e=>{
       seekerLookDrag={x:e.clientX,y:e.clientY}; seekerDragMoved=false;
       return;
     }
-    if(!pointerLocked&&!IS_TOUCH) renderer.domElement.requestPointerLock();
+    if(!IS_TOUCH){
+      pcLookDrag={x:e.clientX,y:e.clientY};
+      return;
+    }
   }
 });
 addEventListener("mousemove",e=>{
   if(!G.mirror)return;
-  if(mirrorDrag==="pending"&&mirrorStart&&Math.hypot(e.clientX-mirrorStart[0],e.clientY-mirrorStart[1])>6){
-    mirrorDrag="orbit";
-  }
-  if(mirrorDrag==="orbit"&&mirrorLast){
+  if(mirrorDrag==="paint"){
+    tryPaintAt(e.clientX,e.clientY);
+  }else if(mirrorDrag==="orbit"&&mirrorLast){
     mirrorAngle-=(e.clientX-mirrorLast[0])*0.007;
     mirrorPitch=clamp(mirrorPitch+(e.clientY-mirrorLast[1])*0.0055,-0.18,1.12);
     mirrorLast=[e.clientX,e.clientY];
   }
 });
 addEventListener("mouseup",e=>{
-  if(G.mirror&&mirrorDrag==="pending"&&mirrorStart){
-    tryPaintAt(mirrorStart[0],mirrorStart[1]);
-  }
+  pcLookDrag=null;
   mirrorDrag=null;mirrorLast=null;mirrorStart=null;mirrorPointerId=null;lastPaintPx=null;
   if(seekerLookDrag){
     if(G.role==="seeker"&&G.phase==="SEEK"&&!seekerDragMoved)tryJudge(mouseX,mouseY);
@@ -2736,11 +2747,15 @@ renderer.domElement.addEventListener("pointerdown",e=>{
   }
   renderer.domElement.setPointerCapture?.(e.pointerId);
   if(G.mirror){
-    lookId=e.pointerId;
     mirrorPointerId=e.pointerId;
-    mirrorDrag="pending";
-    mirrorStart=[e.clientX,e.clientY];
-    lastLook=[e.clientX,e.clientY];
+    if(tryPaintAt(e.clientX,e.clientY)){
+      paintTouch=e.pointerId;
+      mirrorDrag="paint";
+    }else{
+      lookId=e.pointerId;
+      mirrorDrag="orbit";
+      lastLook=[e.clientX,e.clientY];
+    }
     return;
   }
   if(e.clientX<innerWidth*0.45&&joyId===null){
@@ -2752,11 +2767,9 @@ renderer.domElement.addEventListener("pointerdown",e=>{
 addEventListener("pointermove",e=>{
   if(!IS_TOUCH)return;
   if(G.mirror){
-    if(e.pointerId===lookId&&lastLook){
-      if(mirrorDrag==="pending"&&mirrorStart&&Math.hypot(e.clientX-mirrorStart[0],e.clientY-mirrorStart[1])>7){
-        mirrorDrag="orbit";
-      }
-      if(mirrorDrag!=="orbit")return;
+    if(e.pointerId===paintTouch){
+      tryPaintAt(e.clientX,e.clientY);
+    }else if(e.pointerId===lookId&&lastLook){
       mirrorAngle-=(e.clientX-lastLook[0])*0.008;
       mirrorPitch=clamp(mirrorPitch+(e.clientY-lastLook[1])*0.006,-0.18,1.12);
       lastLook=[e.clientX,e.clientY];
@@ -2776,9 +2789,6 @@ addEventListener("pointermove",e=>{
   }
 });
 function releasePointerInput(e){
-  if(G.mirror&&e.pointerId===mirrorPointerId&&mirrorDrag==="pending"&&mirrorStart){
-    tryPaintAt(mirrorStart[0],mirrorStart[1]);
-  }
   if(e.pointerId===joyId){joyId=null;G.moveIn.x=0;G.moveIn.z=0;$("joyBase").style.display="none";
     $("joyKnob").style.left="34px";$("joyKnob").style.top="34px";}
   if(e.pointerId===lookId){lookId=null;lastLook=null;}
