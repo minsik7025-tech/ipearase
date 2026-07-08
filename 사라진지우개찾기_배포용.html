@@ -668,6 +668,12 @@ const Audio2={
   toggleMute(){ this.init(); this.muted=!this.muted; this.master.gain.value=this.muted?0:0.5;
     localStorage.setItem("er_mute",this.muted?"1":"0"); Music.applyMute(); }
 };
+function unlockGameAudio(){
+  Audio2.resume();
+}
+["pointerdown","mousedown","touchstart","keydown"].forEach(type=>{
+  addEventListener(type,unlockGameAudio,{capture:true,passive:true});
+});
 const Music={
   audio:null, mode:null, up:false,
   init(){
@@ -3109,9 +3115,9 @@ const Net={
   },
   handleWhistle(key,w){
     if(!w||w.uid===this.uid)return;
-    if(this.now()-(w.t||0)>5000)return;
+    if(this.now()-(w.t||0)>10000)return;
     const sender=this.players[w.uid];
-    if(!sender||sender.role!=="hider"||sender.found)return;
+    if(sender&&sender.role&&sender.role!=="hider")return;
     playWhistleFromPosition({x:+w.x||0,y:+w.y||0,z:+w.z||0});
     if(G.isHost&&this.db){
       setTimeout(()=>this.fb.set(this.fb.ref(this.db,`rooms/${this.code}/whistles/${key}`),null).catch(()=>{}),2500);
@@ -3160,7 +3166,7 @@ const Net={
     const p=G.spectating?G.specAnchorPos:G.pos;
     const ref=this.fb.push(this.fb.ref(this.db,`rooms/${this.code}/whistles`));
     this.fb.set(ref,{uid:this.uid,x:+p.x.toFixed(2),y:+p.y.toFixed(2),z:+p.z.toFixed(2),t:now,spectating:!!G.spectating}).catch(()=>{});
-    Audio2.whistle(0,0.09,1.05);
+    playWhistleFromPosition(p);
     toast(G.spectating?"휘익! 숨은 자리에서 휘파람을 보냈어요":"휘익! 모두에게 위치 힌트를 보냈어요");
     return true;
   },
