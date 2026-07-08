@@ -51,7 +51,19 @@ const requiredSnippets = [
   "aiMemoryScoreNear",
   "recordRoundLearning",
   "loadAIMemory",
+  "sharedAIMemoryDbs",
+  "mergeAIMemoryRecords",
+  "aiMemoryFingerprint",
+  "eraser-memory-${s.id}",
+  "Promise.allSettled",
+  "AI 학습 데이터 일부 서버 저장 실패",
   "aiMemory/${mapKind}",
+  "handleOwnPlayerRemoved",
+  "네트워크 연결이 끊겨 게임방 참여 정보가 사라졌어요",
+  "ACTIVE_PRESENCE_MS",
+  "START_PRESENCE_MS",
+  "네트워크가 다시 연결됐어요",
+  "setTimeout(r,300+i*350)",
   "phaseStartedAt",
   "blocked?34:-24",
   "aiCanSpotTarget",
@@ -123,6 +135,10 @@ const removedSnippets = [
   'id="codeInput"',
   'id="btnJoin"',
   "코드로 입장"
+  ,"kickPlayer"
+  ,"kickBtn"
+  ,"강퇴"
+  ,"kicked"
   ,"hostSeekerChk"
   ,"hostSeekerWrap"
   ,"nearestWhistleTarget"

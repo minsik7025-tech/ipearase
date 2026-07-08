@@ -290,7 +290,6 @@ label.chk select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(74,127
   .poseCol .mbtn{width:46px;height:46px;font-size:10px;}
 }
 .pchip{position:relative;}
-.kickBtn{font-size:11px;padding:3px 7px;border-width:2px;border-radius:999px;background:#ffb0b0;box-shadow:none;margin-left:3px;}
 #btnLobbyPractice{font-size:14px;}
 #btnPracticeReturn{position:absolute;top:216px;right:12px;left:auto;z-index:60;pointer-events:auto;
   font-size:14px;padding:9px 12px;background:rgba(255,248,231,.98);border-color:var(--red);box-shadow:4px 4px 0 rgba(0,0,0,.34);}
@@ -579,6 +578,8 @@ let selectedServerId=normalizeServerId(new URL(location.href).searchParams.get("
 let FIREBASE_CONFIG=FIREBASE_SERVERS.find(s=>s.id===selectedServerId).config;
 localStorage.setItem("er_server",selectedServerId);
 const SERVER_SOFT_LIMIT=80;
+const ACTIVE_PRESENCE_MS=90000;
+const START_PRESENCE_MS=90000;
 function serverName(id=selectedServerId){return FIREBASE_SERVERS.find(s=>s.id===id)?.name||"1서버";}
 function setSelectedServer(id,{persist=true,reload=false}={}){
   selectedServerId=normalizeServerId(id);
@@ -2856,9 +2857,9 @@ function setPose(p){
 
 /* ================= 네트워크 ================= */
 const Net={
-  mode:"none", fb:null, db:null, uid:null, code:"", nick:"",
+  mode:"none", fb:null, appM:null, db:null, uid:null, code:"", nick:"",
   players:{}, presence:{}, positions:{}, meta:{}, offset:0, posTimer:null, heartbeatTimer:null, texTimer:null, hostTimer:null,
-  phaseAdvanceLock:false, openRooms:[], roomWatchStarted:false, leaving:false, aiMemory:{}, learningSavedRound:null, aiHidePlans:{}, lastWhistleAt:0, aiWhistleNext:{},
+  phaseAdvanceLock:false, openRooms:[], roomWatchStarted:false, leaving:false, aiMemory:{}, sharedMemoryDbs:null, learningSavedRound:null, aiHidePlans:{}, lastWhistleAt:0, aiWhistleNext:{},
   async initFirebase(){
     if(this.db)return true;
     if(!FIREBASE_CONFIG||!FIREBASE_CONFIG.databaseURL){
@@ -2869,7 +2870,7 @@ const Net={
     try{
       const appM=await import("https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js");
       const dbM=await import("https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js");
-      this.fb=dbM;
+      this.appM=appM;this.fb=dbM;
       const appName=`eraser-server-${selectedServerId}`;
       const app=appM.getApps().find(a=>a.name===appName)||appM.initializeApp(FIREBASE_CONFIG,appName);
       this.db=dbM.getDatabase(app);
@@ -2933,7 +2934,7 @@ const Net={
         const activeIds=Object.keys(players).filter(uid=>{
           if(isAIUid(uid))return false;
           const pr=presence[uid];
-          return pr&&pr.online!==false&&typeof pr.lastSeen==="number"&&now-pr.lastSeen<30000;
+          return pr&&pr.online!==false&&typeof pr.lastSeen==="number"&&now-pr.lastSeen<ACTIVE_PRESENCE_MS;
         });
         return {code,meta,players,presence,activeCount:activeIds.length};
       }).filter(r=>r.meta&&r.meta.host&&r.activeCount>0)
@@ -2981,7 +2982,6 @@ const Net={
     await set(ref(this.db,`rooms/${code}/players/${this.uid}`),
       {nick,role:"ghost",found:false,lastSeen:serverTimestamp()});
     await set(ref(this.db,`rooms/${code}/presence/${this.uid}`),{online:true,lastSeen:serverTimestamp()});
-    onDisconnect(ref(this.db,`rooms/${code}/players/${this.uid}`)).remove();
     onDisconnect(ref(this.db,`rooms/${code}/pos/${this.uid}`)).remove();
     onDisconnect(ref(this.db,`rooms/${code}/presence/${this.uid}`)).remove();
     this.attach(); this.startHostLoop();
@@ -2992,7 +2992,12 @@ const Net={
     this.nick=nick;
     const {ref,get,set,onDisconnect,serverTimestamp}=this.fb;
     this.myUidInit();
-    const metaS=await get(ref(this.db,`rooms/${code}/meta`));
+    let metaS=null;
+    for(let i=0;i<3;i++){
+      metaS=await get(ref(this.db,`rooms/${code}/meta`));
+      if(metaS.exists())break;
+      await new Promise(r=>setTimeout(r,300+i*350));
+    }
     if(!metaS.exists())return "noroom";
     this.meta=metaS.val();
     const plS=await get(ref(this.db,`rooms/${code}/players`));
@@ -3003,7 +3008,6 @@ const Net={
     await set(ref(this.db,`rooms/${code}/players/${this.uid}`),
       {nick,role:rejoin?rejoin.role:"hider",found:rejoin?!!rejoin.found:false,lastSeen:serverTimestamp()});
     await set(ref(this.db,`rooms/${code}/presence/${this.uid}`),{online:true,lastSeen:serverTimestamp()});
-    onDisconnect(ref(this.db,`rooms/${code}/players/${this.uid}`)).remove();
     onDisconnect(ref(this.db,`rooms/${code}/pos/${this.uid}`)).remove();
     onDisconnect(ref(this.db,`rooms/${code}/presence/${this.uid}`)).remove();
     this.attach(); if(G.isHost)this.startHostLoop();
@@ -3053,9 +3057,7 @@ const Net={
       const wasHost=(this.meta.host===s.key);
       delete this.players[s.key];delete this.presence[s.key];removeRemote(s.key);onPlayersChange(s.key,"remove");
       if(s.key===this.uid&&!G.isHost&&!this.leaving){
-        Music.stop();
-        alert("선생님이 게임방에서 내보냈어요.");
-        location.href=location.pathname;
+        this.handleOwnPlayerRemoved();
         return;
       }
       if(wasHost&&s.key!==this.uid)onHostLost();
@@ -3065,7 +3067,11 @@ const Net={
     onChildChanged(presenceRef,s=>{this.presence[s.key]=s.val();refreshLobbyGrid();});
     onChildRemoved(presenceRef,s=>{delete this.presence[s.key];refreshLobbyGrid();});
     onValue(ref(this.db,".info/connected"),snap=>{
-      if(!snap.val())return;
+      if(!snap.val()){
+        if(G.screen==="GAME"||G.screen==="LOBBY")toast("네트워크가 잠시 끊겼어요. 자동으로 다시 연결합니다.");
+        return;
+      }
+      if(G.screen==="GAME"||G.screen==="LOBBY")toast("네트워크가 다시 연결됐어요.");
       const pRef=ref(this.db,`rooms/${this.code}/presence/${this.uid}`);
       const meRef=ref(this.db,`rooms/${this.code}/players/${this.uid}`);
       const posRef=ref(this.db,`rooms/${this.code}/pos/${this.uid}`);
@@ -3077,7 +3083,7 @@ const Net={
         lastSeen:serverTimestamp()
       }).catch(()=>{});
       set(pRef,{online:true,lastSeen:serverTimestamp()}).catch(()=>{});
-      onDisconnect(pRef).remove();onDisconnect(meRef).remove();onDisconnect(posRef).remove();
+      onDisconnect(pRef).remove();onDisconnect(posRef).remove();
     });
     if(this.heartbeatTimer)clearInterval(this.heartbeatTimer);
     this.heartbeatTimer=setInterval(()=>{
@@ -3094,6 +3100,11 @@ const Net={
     onChildAdded(whistlesRef,s=>this.handleWhistle(s.key,s.val()));
     // 위치 송신 10Hz (변화 있을 때만)
     this.posTimer=setInterval(()=>this.sendPos(),100);
+  },
+  handleOwnPlayerRemoved(){
+    Music.stop();
+    alert("네트워크 연결이 끊겨 게임방 참여 정보가 사라졌어요. 다시 참여해 주세요.");
+    location.href=location.pathname;
   },
   handleWhistle(key,w){
     if(!w||w.uid===this.uid)return;
@@ -3173,21 +3184,6 @@ const Net={
       this.nick=nick;G.nick=nick;localStorage.setItem("er_nick",nick);
       return true;
     }catch(err){console.error("닉네임 변경 실패",err);return false;}
-  },
-  async kickPlayer(uid){
-    if(!G.isHost||this.mode!=="online"||uid===this.uid)return false;
-    const p=this.players[uid];
-    if(!p)return false;
-    if(!confirm(`${p.nick||"이 참가자"}님을 게임방에서 내보낼까요?`))return false;
-    try{
-      const patch={};
-      patch[`rooms/${this.code}/players/${uid}`]=null;
-      patch[`rooms/${this.code}/presence/${uid}`]=null;
-      patch[`rooms/${this.code}/pos/${uid}`]=null;
-      await this.fb.update(this.fb.ref(this.db),patch);
-      toast(`${p.nick||"참가자"}님을 내보냈어요.`);
-      return true;
-    }catch(err){console.error("강퇴 실패",err);toast("강퇴하지 못했어요");return false;}
   },
   async updateRoomMap(kind){
     const mapKind=MAPS[kind]?kind:"classroom";
@@ -3274,6 +3270,54 @@ const Net={
     const by=Math.round(clamp(pos.y||0,0,WALL_H)/4);
     return `${bx}_${by}_${bz}`;
   },
+  sharedAIMemoryDbs(){
+    if(!this.appM||!this.fb)return this.db?[{serverId:selectedServerId,db:this.db}]:[];
+    if(this.sharedMemoryDbs)return this.sharedMemoryDbs;
+    this.sharedMemoryDbs=FIREBASE_SERVERS.map(s=>{
+      const appName=`eraser-memory-${s.id}`;
+      const app=this.appM.getApps().find(a=>a.name===appName)||this.appM.initializeApp(s.config,appName);
+      return {serverId:s.id,db:this.fb.getDatabase(app)};
+    });
+    return this.sharedMemoryDbs;
+  },
+  aiMemoryFingerprint(m){
+    if(!m)return "";
+    const n=v=>Number(v||0).toFixed(3);
+    return [n(m.x),n(m.y),n(m.z),n(m.score),Number(m.count||0),Number(m.survived||0),Number(m.found||0),n(m.bestSeconds),Number(m.updatedAt||0)].join("|");
+  },
+  mergeAIMemoryPair(cur,next){
+    if(!cur)return Object.assign({},next);
+    const countA=Math.max(1,Number(cur.count||1));
+    const countB=Math.max(1,Number(next.count||1));
+    const count=countA+countB;
+    const weighted=(field)=>(Number(cur[field]||0)*countA+Number(next[field]||0)*countB)/count;
+    const curUpdated=Number(cur.updatedAt||0);
+    const nextUpdated=Number(next.updatedAt||0);
+    return {
+      x:weighted("x"),y:weighted("y"),z:weighted("z"),
+      score:clamp(weighted("score"),-45,85),
+      count,
+      survived:Number(cur.survived||0)+Number(next.survived||0),
+      found:Number(cur.found||0)+Number(next.found||0),
+      bestSeconds:Math.max(Number(cur.bestSeconds||0),Number(next.bestSeconds||0)),
+      updatedAt:Math.max(curUpdated,nextUpdated),
+      lastNick:nextUpdated>=curUpdated?(next.lastNick||cur.lastNick||"지우개"):(cur.lastNick||next.lastNick||"지우개")
+    };
+  },
+  mergeAIMemoryRecords(sources=[]){
+    const merged={},seen={};
+    sources.forEach(source=>{
+      Object.entries(source||{}).forEach(([key,value])=>{
+        if(!value)return;
+        const fp=this.aiMemoryFingerprint(value);
+        seen[key]=seen[key]||new Set();
+        if(seen[key].has(fp))return;
+        seen[key].add(fp);
+        merged[key]=this.mergeAIMemoryPair(merged[key],value);
+      });
+    });
+    return merged;
+  },
   aiMemoryScoreNear(pos){
     const entries=Object.values(this.aiMemory||{});
     if(!entries.length)return 0;
@@ -3289,14 +3333,19 @@ const Net={
     return weight?clamp(score/weight,-28,36):0;
   },
   async loadAIMemory(mapKind=currentMapKind){
-    if(!this.db||!this.fb)return;
+    if(!this.db||!this.fb)return {};
     try{
-      const snap=await this.fb.get(this.fb.ref(this.db,`aiMemory/${mapKind}`));
-      this.aiMemory=snap.exists()?snap.val():{};
+      const dbs=this.sharedAIMemoryDbs();
+      const reads=await Promise.allSettled(dbs.map(({db})=>this.fb.get(this.fb.ref(db,`aiMemory/${mapKind}`))));
+      const sources=reads.filter(r=>r.status==="fulfilled"&&r.value.exists()).map(r=>r.value.val());
+      this.aiMemory=this.mergeAIMemoryRecords(sources);
+      const failed=reads.filter(r=>r.status==="rejected").length;
+      if(failed)console.warn(`AI 학습 데이터 일부 서버 로드 실패: ${failed}개`);
     }catch(err){
       console.warn("AI 학습 데이터 로드 실패",err);
       this.aiMemory={};
     }
+    return this.aiMemory;
   },
   aiSpotPosition(spot){
     return new THREE.Vector3(
@@ -3475,11 +3524,7 @@ const Net={
     const mapKind=MAPS[this.meta.mapKind]?this.meta.mapKind:currentMapKind;
     const seekStarted=this.meta.phaseStartedAt||((this.meta.phaseEndsAt||this.now())-180000);
     const updates={};
-    let existing={};
-    try{
-      const snap=await this.fb.get(this.fb.ref(this.db,`aiMemory/${mapKind}`));
-      existing=snap.exists()?snap.val():{};
-    }catch(err){console.warn("AI 학습 데이터 읽기 실패",err);}
+    const existing=await this.loadAIMemory(mapKind);
     Object.entries(this.players).forEach(([uid,p])=>{
       if(p.role!=="hider")return;
       const pos=parsePositionString(this.positions[uid]);
@@ -3506,7 +3551,9 @@ const Net={
       this.aiMemory[key]=next;
     });
     if(Object.keys(updates).length){
-      this.fb.update(this.fb.ref(this.db),updates).catch(err=>console.warn("AI 학습 데이터 저장 실패",err));
+      const writes=await Promise.allSettled(this.sharedAIMemoryDbs().map(({db})=>this.fb.update(this.fb.ref(db),updates)));
+      const failed=writes.filter(r=>r.status==="rejected").length;
+      if(failed)console.warn(`AI 학습 데이터 일부 서버 저장 실패: ${failed}개`);
     }
   },
   runAIHostTick(){
@@ -3612,7 +3659,7 @@ const Net={
       const activeIds=Object.keys(allPlayers).filter(uid=>{
         if(isAIUid(uid))return Number(uid.slice(3))<=this.desiredAICount();
         const pr=latestPresence[uid];
-        return uid===this.uid||(pr&&pr.online!==false&&typeof pr.lastSeen==="number"&&now-pr.lastSeen<20000);
+        return uid===this.uid||(pr&&pr.online!==false&&typeof pr.lastSeen==="number"&&now-pr.lastSeen<START_PRESENCE_MS);
       });
       const latestPlayers=Object.fromEntries(activeIds.map(uid=>[uid,allPlayers[uid]]));
       this.players=latestPlayers;this.presence=latestPresence;refreshLobbyGrid();
@@ -4005,7 +4052,7 @@ function refreshLobbyGrid(){
   const now=Net.now?Net.now():Date.now();
   const entries=Object.entries(Net.players).filter(([u])=>{
     if(isAIUid(u))return true;
-    const pr=Net.presence[u];return u===Net.uid||(pr&&pr.online!==false&&typeof pr.lastSeen==="number"&&now-pr.lastSeen<20000);
+    const pr=Net.presence[u];return u===Net.uid||(pr&&pr.online!==false&&typeof pr.lastSeen==="number"&&now-pr.lastSeen<ACTIVE_PRESENCE_MS);
   });
   const humanCount=entries.filter(([u])=>!isAIUid(u)).length;
   const aiCount=entries.length-humanCount;
@@ -4013,12 +4060,6 @@ function refreshLobbyGrid(){
     const d=document.createElement("div");
     d.className="pchip"+(u===Net.meta.host?" host":"");
     d.innerHTML=`<span class="er"></span><span>${escapeHtml(p.nick||"?")}${u===Net.meta.host?" 👑":""}</span>`;
-    if(G.isHost&&u!==Net.uid&&!isAIUid(u)){
-      const kick=document.createElement("button");
-      kick.className="kickBtn";kick.textContent="강퇴";kick.title=`${p.nick||"참가자"} 내보내기`;
-      kick.onclick=e=>{e.stopPropagation();Net.kickPlayer(u);};
-      d.appendChild(kick);
-    }
     grid.appendChild(d);
   });
   $("waitMsg").textContent=G.isHost?`${humanCount}명 접속${aiCount?` · AI ${aiCount}명`:""}`:"선생님이 시작하기를 기다리는 중...";
@@ -4124,7 +4165,7 @@ async function fetchServerLoad(server){
       Object.keys(players).forEach(uid=>{
         if(String(uid).startsWith("ai_"))return;
         const pr=presence[uid];
-        if(pr&&pr.online!==false&&typeof pr.lastSeen==="number"&&now-pr.lastSeen<45000)roomActive++;
+        if(pr&&pr.online!==false&&typeof pr.lastSeen==="number"&&now-pr.lastSeen<ACTIVE_PRESENCE_MS)roomActive++;
       });
       if(meta.host&&roomActive>0){active+=roomActive;roomCount++;}
     });
