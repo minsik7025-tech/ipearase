@@ -3135,17 +3135,21 @@ const Net={
   },
   sendPose(){ G.lastPosSent=""; },
   sendWhistle(){
-    if(this.mode!=="online"||!this.db||!this.code||G.role!=="hider"||G.phase!=="SEEK"||G.found||G.spectating)return false;
+    if(this.mode!=="online"||!this.db||!this.code||G.role!=="hider"||G.phase!=="SEEK"||G.found){
+      if(G.screen==="GAME")toast("휘파람은 술래가 찾는 중인 지우개만 불 수 있어요");
+      return false;
+    }
     const now=this.now();
     if(now-this.lastWhistleAt<3500){
       toast("휘파람은 잠깐 쉬었다가 다시 불 수 있어요");
       return false;
     }
     this.lastWhistleAt=now;
+    const p=G.spectating?G.specAnchorPos:G.pos;
     const ref=this.fb.push(this.fb.ref(this.db,`rooms/${this.code}/whistles`));
-    this.fb.set(ref,{uid:this.uid,x:+G.pos.x.toFixed(2),y:+G.pos.y.toFixed(2),z:+G.pos.z.toFixed(2),t:now}).catch(()=>{});
+    this.fb.set(ref,{uid:this.uid,x:+p.x.toFixed(2),y:+p.y.toFixed(2),z:+p.z.toFixed(2),t:now,spectating:!!G.spectating}).catch(()=>{});
     Audio2.whistle(0,0.09,1.05);
-    toast("휘익! 술래에게 위치 힌트를 보냈어요");
+    toast(G.spectating?"휘익! 숨은 자리에서 휘파람을 보냈어요":"휘익! 술래에게 위치 힌트를 보냈어요");
     return true;
   },
   uploadTex(force=false){
